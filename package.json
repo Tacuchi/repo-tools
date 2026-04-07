@@ -1,0 +1,28 @@
+{
+  "name": "@tacuchi/repo-tools",
+  "version": "1.0.0",
+  "description": "CLI to detect, back up, restore, and watch R.E.P.O. save folders.",
+  "bin": {
+    "repo-tools": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli.js"
+  },
+  "files": [
+    "src"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tacuchi/repo-tools.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tacuchi/repo-tools/issues"
+  },
+  "homepage": "https://github.com/Tacuchi/repo-tools#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
