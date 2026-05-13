@@ -37,7 +37,8 @@ function removeDirectory(targetPath) {
   }
 }
 
-function getDirectorySize(targetPath) {
+function getDirectorySize(targetPath, options = {}) {
+  const { skipInternalBackups = false } = options;
   let totalBytes = 0;
   const stack = [targetPath];
 
@@ -50,6 +51,9 @@ function getDirectorySize(targetPath) {
       if (entry.isDirectory()) {
         stack.push(fullPath);
       } else if (entry.isFile()) {
+        if (skipInternalBackups && isInternalGameBackup(fullPath)) {
+          continue;
+        }
         totalBytes += fs.statSync(fullPath).size;
       }
     }
@@ -58,7 +62,13 @@ function getDirectorySize(targetPath) {
   return totalBytes;
 }
 
-function listFilesRecursive(targetPath) {
+function isInternalGameBackup(filePath) {
+  const lower = String(filePath).toLowerCase();
+  return lower.endsWith(".bak") || lower.endsWith(".tmp") || lower.endsWith("~");
+}
+
+function listFilesRecursive(targetPath, options = {}) {
+  const { skipInternalBackups = false } = options;
   const files = [];
   const stack = [targetPath];
 
@@ -71,6 +81,9 @@ function listFilesRecursive(targetPath) {
       if (entry.isDirectory()) {
         stack.push(fullPath);
       } else if (entry.isFile()) {
+        if (skipInternalBackups && isInternalGameBackup(fullPath)) {
+          continue;
+        }
         files.push(fullPath);
       }
     }
@@ -122,8 +135,8 @@ function hashFiles(filePaths, basePath = null) {
   return hash.digest("hex");
 }
 
-function hashDirectory(targetPath) {
-  const files = listFilesRecursive(targetPath);
+function hashDirectory(targetPath, options = {}) {
+  const files = listFilesRecursive(targetPath, options);
   return hashFiles(files, targetPath);
 }
 
@@ -141,6 +154,7 @@ module.exports = {
   formatLocalTimestamp,
   getDirectorySize,
   copyDirectory,
+  isInternalGameBackup,
   listFilesRecursive,
   pathExists,
   readJson,

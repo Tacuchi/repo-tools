@@ -6,6 +6,7 @@ const { execSync } = require("child_process");
 const {
   autoBackupsRoot,
   backupsRoot,
+  exportsRoot,
   gameDataRoot,
   gameSavesRoot,
   preRestoreRoot,
@@ -16,6 +17,7 @@ const {
   formatLocalTimestamp,
   getDirectorySize,
   hashDirectory,
+  isInternalGameBackup,
   listFilesRecursive,
   pathExists,
   readFileSafe,
@@ -25,6 +27,30 @@ const {
   sleep,
   writeJson,
 } = require("./fs-utils");
+const logger = require("./logger");
+
+const HASH_OPTIONS = { skipInternalBackups: true };
+const manifestCache = new Map();
+
+function readCachedManifest(manifestPath) {
+  try {
+    const stats = fs.statSync(manifestPath);
+    const cached = manifestCache.get(manifestPath);
+    if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+      return cached.data;
+    }
+    const data = readJson(manifestPath);
+    manifestCache.set(manifestPath, { mtimeMs: stats.mtimeMs, size: stats.size, data });
+    return data;
+  } catch (error) {
+    manifestCache.delete(manifestPath);
+    throw error;
+  }
+}
+
+function invalidateManifestCache(manifestPath) {
+  manifestCache.delete(manifestPath);
+}
 
 const ES3_PASSWORD = "Why would you want to cheat?... :o It's no fun. :') :'D";
 
@@ -35,6 +61,7 @@ function getPathsReport() {
     backupsRoot,
     autoBackupsRoot,
     preRestoreRoot,
+    exportsRoot,
   };
 }
 
@@ -268,7 +295,7 @@ function findPrimaryEs3InFolder(folderPath, saveId) {
 
 function createBackupManifest(sourceSave, backupFolderPath, backupId, options = {}) {
   const files = listFilesRecursive(backupFolderPath).map((filePath) => path.relative(backupFolderPath, filePath));
-  const contentHash = options.contentHash || hashDirectory(backupFolderPath);
+  const contentHash = options.contentHash || hashDirectory(backupFolderPath, HASH_OPTIONS);
   const phaseMetadata = options.phaseMetadata || sourceSave.phaseMetadata || inferPhaseMetadata(path.join(backupFolderPath, path.basename(sourceSave.primaryEs3Path || "")));
   const label = options.label || createPhaseLabel(sourceSave, contentHash, phaseMetadata);
 
@@ -310,7 +337,7 @@ function backupSaves(selectedSaves, options = {}) {
   const results = [];
 
   for (const saveEntry of selectedSaves) {
-    const contentHash = hashDirectory(saveEntry.folderPath);
+    const contentHash = hashDirectory(saveEntry.folderPath, HASH_OPTIONS);
     const phaseMetadata = saveEntry.phaseMetadata || inferPhaseMetadata(saveEntry.primaryEs3Path);
     const label = options.label || createPhaseLabel(saveEntry, contentHash, phaseMetadata);
     const backupId = `${formatLocalTimestamp()}__${sanitizeName(saveEntry.saveId)}__${sanitizeName(label)}`;
@@ -326,7 +353,21 @@ function backupSaves(selectedSaves, options = {}) {
       phaseMetadata,
       saveLevelFlag: saveEntry.saveLevelFlag,
     });
-    writeJson(path.join(destinationPath, "manifest.json"), manifest);
+    const manifestPath = path.join(destinationPath, "manifest.json");
+    writeJson(manifestPath, manifest);
+    invalidateManifestCache(manifestPath);
+
+    logger.info("backup created", {
+      saveId: saveEntry.saveId,
+      backupId,
+      source: sourceLabel,
+      label,
+      runLevel: manifest.runLevel,
+      stateLabel: manifest.stateLabel,
+      players: manifest.players,
+      sizeBytes: manifest.sizeBytes,
+      contentHash: contentHash ? contentHash.slice(0, 12) : null,
+    });
 
     results.push({
       backupId,
@@ -352,7 +393,7 @@ function readBackupEntriesFromRoot(rootPath, source) {
         return null;
       }
 
-      const manifest = readJson(manifestPath);
+      const manifest = readCachedManifest(manifestPath);
       const saveFolderPath = path.join(rootPath, entry.name, manifest.saveId);
       const inferredPhaseMetadata = inferPhaseMetadata(findPrimaryEs3InFolder(saveFolderPath, manifest.saveId));
       const phaseMetadata = getFallbackPhaseMetadata(manifest) || inferredPhaseMetadata;
@@ -413,6 +454,8 @@ function toggleBackupFavorite(backupId) {
   const manifest = readJson(manifestPath);
   manifest.isFavorite = !Boolean(manifest.isFavorite);
   writeJson(manifestPath, manifest);
+  invalidateManifestCache(manifestPath);
+  logger.info("toggle favorite", { backupId, isFavorite: manifest.isFavorite });
 
   return getBackupEntries().find((entry) => entry.backupId === backupId) || {
     ...backupEntry,
@@ -453,7 +496,7 @@ function snapshotCurrentSave(saveId) {
     primaryFile: null,
     label: "pre-restore",
     source: "pre-restore",
-    contentHash: hashDirectory(destinationSavePath),
+    contentHash: hashDirectory(destinationSavePath, HASH_OPTIONS),
     phaseMetadata,
     teamName: phaseMetadata?.teamName || null,
     players,
@@ -468,7 +511,9 @@ function snapshotCurrentSave(saveId) {
     files: listFilesRecursive(destinationSavePath).map((filePath) => path.relative(destinationSavePath, filePath)),
     sizeBytes: getDirectorySize(destinationSavePath),
   };
-  writeJson(path.join(snapshotPath, "manifest.json"), manifest);
+  const manifestPath = path.join(snapshotPath, "manifest.json");
+  writeJson(manifestPath, manifest);
+  invalidateManifestCache(manifestPath);
 
   return {
     snapshotId,
@@ -478,10 +523,12 @@ function snapshotCurrentSave(saveId) {
 
 function restoreBackup(backupEntry) {
   if (isGameRunning()) {
+    logger.warn("restore aborted: game running", { saveId: backupEntry.saveId });
     throw new Error("R.E.P.O. appears to be running. Close REPO.exe before restoring a save.");
   }
 
   if (!backupEntry.isValid) {
+    logger.error("restore aborted: invalid backup", { backupId: backupEntry.backupId });
     throw new Error(`Backup ${backupEntry.backupId} is missing its save folder.`);
   }
 
@@ -491,6 +538,13 @@ function restoreBackup(backupEntry) {
 
   removeDirectory(destinationSavePath);
   copyDirectory(backupEntry.saveFolderPath, destinationSavePath);
+
+  logger.info("restore completed", {
+    saveId: backupEntry.saveId,
+    backupId: backupEntry.backupId,
+    restoredTo: destinationSavePath,
+    snapshotId: currentSaveSnapshot ? currentSaveSnapshot.snapshotId : null,
+  });
 
   return {
     restoredTo: destinationSavePath,
@@ -522,7 +576,7 @@ async function waitForStableSave(folderPath, attempts = 6, delayMs = 350) {
       continue;
     }
 
-    const currentHash = hashDirectory(folderPath);
+    const currentHash = hashDirectory(folderPath, HASH_OPTIONS);
     if (currentHash && previousHash === currentHash) {
       return currentHash;
     }
@@ -597,6 +651,12 @@ function watchSaveChanges(options = {}) {
         });
         const result = results[0];
         latestHashes.set(saveId, result.manifest.contentHash);
+        logger.info("auto-watch backup", {
+          saveId,
+          reason,
+          backupId: result.backupId,
+          label: result.manifest.label,
+        });
         log({
           type: "backed-up",
           saveId,
@@ -611,6 +671,7 @@ function watchSaveChanges(options = {}) {
           contentHash: result.manifest.contentHash,
         });
       } catch (error) {
+        logger.error("auto-watch backup failed", { saveId, reason, error });
         log({ type: "error", saveId, error });
       } finally {
         inFlight.delete(saveId);
@@ -645,13 +706,110 @@ function watchSaveChanges(options = {}) {
   };
 }
 
+function resolveEs3Path(entry) {
+  if (!entry) {
+    return null;
+  }
+  if (entry.primaryEs3Path && pathExists(entry.primaryEs3Path)) {
+    return entry.primaryEs3Path;
+  }
+  if (entry.saveFolderPath) {
+    return findPrimaryEs3InFolder(entry.saveFolderPath, entry.saveId);
+  }
+  if (entry.folderPath) {
+    return findPrimaryEs3InFolder(entry.folderPath, entry.saveId);
+  }
+  return null;
+}
+
+function decryptSaveAsJson(entryOrPath) {
+  const es3Path = typeof entryOrPath === "string"
+    ? entryOrPath
+    : resolveEs3Path(entryOrPath);
+  if (!es3Path) {
+    return null;
+  }
+  return decryptEs3File(es3Path);
+}
+
+function exportSaveAsJsonFile(entryOrPath, destinationPath) {
+  const data = decryptSaveAsJson(entryOrPath);
+  if (!data) {
+    return null;
+  }
+  ensureDir(path.dirname(destinationPath));
+  fs.writeFileSync(destinationPath, JSON.stringify(data, null, 2) + "\n", "utf8");
+  return destinationPath;
+}
+
+function buildExportFilename(entry, kind) {
+  const identifier = entry?.backupId || entry?.saveId || "save";
+  const timestamp = formatLocalTimestamp();
+  return `${timestamp}__${sanitizeName(identifier)}__${kind}.json`;
+}
+
+function exportEntryToJson(entry, kind) {
+  const filename = buildExportFilename(entry, kind);
+  const destinationPath = path.join(exportsRoot, filename);
+  return exportSaveAsJsonFile(entry, destinationPath);
+}
+
+function getAutoBackupsBySaveId() {
+  const grouped = new Map();
+  for (const entry of readBackupEntriesFromRoot(autoBackupsRoot, "auto-watch")) {
+    if (!grouped.has(entry.saveId)) {
+      grouped.set(entry.saveId, []);
+    }
+    grouped.get(entry.saveId).push(entry);
+  }
+  for (const list of grouped.values()) {
+    list.sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+  }
+  return grouped;
+}
+
+function pruneAutoBackups(saveId, keepCount) {
+  if (!Number.isInteger(keepCount) || keepCount < 0) {
+    throw new Error(`keepCount must be a non-negative integer, received ${keepCount}.`);
+  }
+  const entries = readBackupEntriesFromRoot(autoBackupsRoot, "auto-watch")
+    .filter((entry) => entry.saveId === saveId)
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+
+  const removed = [];
+  let kept = 0;
+  for (const entry of entries) {
+    if (entry.isFavorite) {
+      continue;
+    }
+    if (kept < keepCount) {
+      kept += 1;
+      continue;
+    }
+    removeDirectory(entry.destinationPath);
+    invalidateManifestCache(path.join(entry.destinationPath, "manifest.json"));
+    removed.push(entry);
+  }
+  if (removed.length > 0) {
+    logger.info("auto-backups pruned", { saveId, keepCount, removedCount: removed.length });
+  }
+  return removed;
+}
+
 module.exports = {
   autoBackupsRoot,
   backupSaves,
+  decryptSaveAsJson,
+  exportEntryToJson,
+  exportSaveAsJsonFile,
+  exportsRoot,
+  getAutoBackupsBySaveId,
   getBackupEntries,
   getPathsReport,
   getSaveEntries,
   isGameRunning,
+  pruneAutoBackups,
+  resolveEs3Path,
   restoreBackup,
   toggleBackupFavorite,
   watchSaveChanges,

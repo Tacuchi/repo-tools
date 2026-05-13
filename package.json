@@ -1,6 +1,6 @@
 {
   "name": "@tacuchi/repo-tools",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CLI to detect, back up, restore, and watch R.E.P.O. save folders.",
   "bin": {
     "repo-tools": "./src/cli.js"

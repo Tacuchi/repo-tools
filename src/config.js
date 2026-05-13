@@ -42,6 +42,9 @@ const appDataRoot = process.env.REPO_SAVE_APP_DATA_ROOT || defaultAppDataRoot;
 const backupsRoot = path.join(appDataRoot, "backups");
 const autoBackupsRoot = path.join(appDataRoot, "auto-backups");
 const preRestoreRoot = path.join(appDataRoot, "pre-restore");
+const exportsRoot = path.join(appDataRoot, "exports");
+const logsRoot = path.join(appDataRoot, "logs");
+const logFilePath = path.join(logsRoot, "repo-tools.log");
 
 module.exports = {
   projectRoot,
@@ -51,4 +54,7 @@ module.exports = {
   backupsRoot,
   autoBackupsRoot,
   preRestoreRoot,
+  exportsRoot,
+  logsRoot,
+  logFilePath,
 };
